@@ -66,9 +66,9 @@ def get_grad_log_ratio(discriminator, vpsde, unnormalized_input, std_wve_t, img_
     mean_vp_tau, tau = vpsde.transform_unnormalized_wve_to_normalized_vp(std_wve_t) ## VP pretrained classifier
     if tau.min() > time_max or tau.min() < time_min or discriminator == None:
         if log:
-          return torch.zeros_like(unnormalized_input), 10000000. * torch.ones(unnormalized_input.shape[0], device=unnormalized_input.device)
+          return torch.zeros_like(unnormalized_input).to(torch.float32), 10000000. * torch.ones(unnormalized_input.shape[0], device=unnormalized_input.device).to(torch.float32)
         if not log_only:
-            return torch.zeros_like(unnormalized_input)
+            return torch.zeros_like(unnormalized_input).to(torch.float32)
         else:
             input = mean_vp_tau[:, None, None, None] * unnormalized_input
     else:
@@ -80,7 +80,7 @@ def get_grad_log_ratio(discriminator, vpsde, unnormalized_input, std_wve_t, img_
             tau = vpsde.compute_t_cos_from_t_lin(tau)
         tau = torch.ones(input.shape[0], device=tau.device) * tau
         log_ratio = get_log_ratio(discriminator, x_, tau, class_labels)
-        return log_ratio
+        return log_ratio.to(torch.float32)
     with torch.enable_grad():
         x_ = input.float().clone().detach().requires_grad_()
         if img_resolution == 64: # ADM trained UNet classifier for 64x64 with Cosine VPSDE
@@ -93,8 +93,8 @@ def get_grad_log_ratio(discriminator, vpsde, unnormalized_input, std_wve_t, img_
         # print(discriminator_guidance_score.shape)
         discriminator_guidance_score *= - ((std_wve_t[:,None,None,None] ** 2) * mean_vp_tau[:,None,None,None])
     if log:
-      return discriminator_guidance_score, log_ratio
-    return discriminator_guidance_score
+      return discriminator_guidance_score.to(torch.float32), log_ratio.to(torch.float32)
+    return discriminator_guidance_score.to(torch.float32)
 
 def get_log_ratio(discriminator, input, time, class_labels):
     if discriminator == None:
@@ -103,7 +103,7 @@ def get_log_ratio(discriminator, input, time, class_labels):
         log_ratio = discriminator(input, timesteps=time, condition=class_labels)
         # prediction = torch.clip(logits, 1e-5, 1. - 1e-5)
         # log_ratio = torch.log(prediction / (1. - prediction))
-        return log_ratio
+        return log_ratio.to(torch.float32)
 
 class vpsde():
     def __init__(self):
@@ -143,16 +143,16 @@ class vpsde():
     def get_diffusion_time(self, batch_size, batch_device, t_min=1e-5, importance_sampling=True):
         if importance_sampling:
             Z = self.normalizing_constant(t_min)
-            u = torch.rand(batch_size, device=batch_device)
+            u = torch.rand(batch_size, device='cpu')
             return (-self.beta_0 + torch.sqrt(self.beta_0 ** 2 + 2 * (self.beta_1 - self.beta_0) *
                     torch.log(1. + torch.exp(Z * u + self.antiderivative(t_min))))) / (self.beta_1 - self.beta_0), Z.detach()
         else:
-            return torch.rand(batch_size, device=batch_device) * (self.T - t_min) + t_min, 1
+            return torch.rand(batch_size, device='cpu') * (self.T - t_min) + t_min, 1
 
     def antiderivative(self, t, stabilizing_constant=0.):
         if isinstance(t, float) or isinstance(t, int):
-            t = torch.tensor(t, device=batch_device).float()
-            print(t.device)
+            t = torch.tensor(t).float()
+            #print(t.device)
         return torch.log(1. - torch.exp(- self.integral_beta(t)) + stabilizing_constant) + self.integral_beta(t)
 
     def normalizing_constant(self, t_min):
