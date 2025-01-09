@@ -1,9 +1,9 @@
 import os
 
-os.environ['PT_HPU_LAZY_MODE'] = '0'
+#os.environ['PT_HPU_LAZY_MODE'] = '0'
 os.environ['RANK'] = "0"
 import habana_frameworks.torch.core as htcore
-import habana_frameworks.torch.distributed.hccl
+#import habana_frameworks.torch.distributed.hccl
 
 import click
 from tqdm.auto import tqdm
@@ -17,9 +17,10 @@ from torchvision.utils import make_grid, save_image
 import classifier_lib
 import random
 import time
+import copy as cpy
 
 
-torch.distributed.init_process_group(backend='hccl')
+#torch.distributed.init_process_group(backend='hccl')
 
 #----------------------------------------------------------------------------
 # Proposed DiffRS sampler.
@@ -37,6 +38,10 @@ def diffrs_sampler(
     S_churn_max = torch.tensor([np.sqrt(2) - 1] * latents.shape[0], device=latents.device)
     S_noise_vec = torch.tensor([S_noise] * latents.shape[0], device=latents.device)
     gamma_vec = torch.minimum(S_churn_vec / num_steps, S_churn_max)
+
+    S_churn_max = S_churn_max.to(torch.float32)
+    gamma_vec = gamma_vec.to(torch.float32)
+    print("S_churn ",S_churn_vec.dtype, S_churn_max.dtype, S_noise_vec.dtype, gamma_vec.dtype)
 
     def sampling_loop(x_next, lst_idx, log_ratio_prev, per_sample_nfe, labels, warmup=False):
         t_cur = t_steps[lst_idx]
@@ -59,13 +64,13 @@ def diffrs_sampler(
                     labels_ = labels[bool_zero] if labels is not None else None
                     log_ratio_prev_check = log_ratio_prev[bool_zero]
                     log_ratio = classifier_lib.get_grad_log_ratio(discriminator, vpsde, x_check, t_steps[lst_idx][bool_zero], net.img_resolution, time_min, time_max, labels_, log_only=True).detach()
-                    bool_neg_log_ratio = log_ratio < adaptive[lst_idx][bool_zero] + torch.log(torch.rand_like(log_ratio) + 1e-7)
+                    bool_neg_log_ratio = log_ratio < adaptive[lst_idx][bool_zero] + torch.log(torch.rand_like(log_ratio,device='cpu') + 1e-7)
                     bool_reject = torch.arange(len(bool_zero), device=bool_zero.device)[bool_zero][bool_neg_log_ratio]
                     bool_accept = torch.arange(len(bool_zero), device=bool_zero.device)[bool_zero][~bool_neg_log_ratio]
 
                     if bool_neg_log_ratio.sum() != 0:
-                        eps_rand = randn_like(x_check[bool_neg_log_ratio])
-                        x_back = t_steps[0] * eps_rand
+                        eps_rand = randn_like(x_check[bool_neg_log_ratio],device='cpu')
+                        x_back = t_steps[0] * eps_rand.to('hpu')
                         x_cur[bool_reject] = x_back
 
                     log_ratio_prev_check[~bool_neg_log_ratio] = log_ratio[~bool_neg_log_ratio]
@@ -76,7 +81,10 @@ def diffrs_sampler(
 
         if bool_gamma.sum() != 0:
             t_hat_temp = net.round_sigma(t_cur + gamma_vec * t_cur)[bool_gamma]
-            x_hat_temp = x_cur[bool_gamma] + (t_hat_temp ** 2 - t_cur[bool_gamma] ** 2).sqrt()[:, None, None, None] * S_noise_vec[bool_gamma, None, None,None] * randn_like(x_cur[bool_gamma])
+            clamp = torch.clamp(t_hat_temp ** 2 - t_cur[bool_gamma] ** 2, min=0).cpu()
+            yy=randn_like(x_cur[bool_gamma],device='cpu')
+            x_hat_temp = x_cur[bool_gamma] + clamp.to('hpu').sqrt()[:, None, None, None] * S_noise_vec[bool_gamma, None, None,None] * yy.to('hpu')
+            #x_hat_temp = x_cur[bool_gamma] + torch.clamp(t_hat_temp ** 2 - t_cur[bool_gamma] ** 2).sqrt().cpu()[:, None, None, None] * S_noise_vec[bool_gamma, None, None,None] * randn_like(x_cur[bool_gamma]).cpu()
 
             t_hat = t_cur
             x_hat = x_cur
@@ -88,7 +96,7 @@ def diffrs_sampler(
             x_hat = x_cur
 
         # Euler step.
-        denoised = net(x_hat, t_hat, labels).to(torch.float64)
+        denoised = net(x_hat, t_hat, labels).to(torch.float32)
         per_sample_nfe += 1
         if mode == 'debug':
             nonlocal total_nfe
@@ -100,7 +108,7 @@ def diffrs_sampler(
         bool_2nd = lst_idx < num_steps - 1
         if bool_2nd.sum() != 0:
             labels_ = labels[bool_2nd] if labels is not None else None
-            denoised = net(x_next[bool_2nd], t_next[bool_2nd], labels_).to(torch.float64)
+            denoised = net(x_next[bool_2nd], t_next[bool_2nd], labels_).to(torch.float32)
             per_sample_nfe[bool_2nd] += 1
             if mode == 'debug':
                 total_nfe += len(denoised)
@@ -130,15 +138,15 @@ def diffrs_sampler(
                 log_ratio_prev_check = log_ratio_prev[bool_check]
                 log_ratio = classifier_lib.get_grad_log_ratio(discriminator, vpsde, x_check, t_steps[lst_idx][bool_check], net.img_resolution, time_min, time_max, labels_, log_only=True).detach()
                 if count == 0:
-                    bool_neg_log_ratio = log_ratio < adaptive2[lst_idx][bool_check] + torch.log(torch.rand_like(log_ratio) + 1e-7) + log_ratio_prev_check
+                    bool_neg_log_ratio = log_ratio < adaptive2[lst_idx][bool_check] + torch.log(torch.rand_like(log_ratio,device='cpu') + 1e-7) + log_ratio_prev_check
                 else:
-                    bool_neg_log_ratio = log_ratio < adaptive[lst_idx][bool_check] + torch.log(torch.rand_like(log_ratio) + 1e-7)
+                    bool_neg_log_ratio = log_ratio < adaptive[lst_idx][bool_check] + torch.log(torch.rand_like(log_ratio,device='cpu') + 1e-7)
                 bool_reject = torch.arange(len(bool_check), device=bool_check.device)[bool_check][bool_neg_log_ratio]
                 bool_accept = torch.arange(len(bool_check), device=bool_check.device)[bool_check][~bool_neg_log_ratio]
 
                 if bool_neg_log_ratio.sum() != 0:
-                    eps_rand = randn_like(x_check[bool_neg_log_ratio])
-                    x_back = x_check[bool_neg_log_ratio] + (t_steps[lst_idx - backsteps][bool_check] ** 2 - t_steps[lst_idx][bool_check] ** 2).sqrt()[bool_neg_log_ratio][:, None, None, None] * eps_rand
+                    eps_rand = randn_like(x_check[bool_neg_log_ratio],device='cpu')
+                    x_back = x_check[bool_neg_log_ratio] + (t_steps[lst_idx - backsteps][bool_check] ** 2 - t_steps[lst_idx][bool_check] ** 2).sqrt()[bool_neg_log_ratio][:, None, None, None] * eps_rand.to('hpu')
                     x_next[bool_reject] = x_back
                     lst_idx[bool_reject] = lst_idx[bool_reject] - backsteps
 
@@ -162,12 +170,12 @@ def diffrs_sampler(
         bool_check2 = per_sample_nfe + (num_steps * 2 - 1 - lst_idx * 2) > max_iter
         if bool_check2.sum() != 0:
             pbar.update(bool_check2.sum().item())
-            eps_rand = randn_like(x_next[bool_check2])
-            x_next[bool_check2] = t_steps[0] * eps_rand
+            eps_rand = randn_like(x_next[bool_check2],device='cpu')
+            x_next[bool_check2] = t_steps[0] * eps_rand.to('hpu')
             lst_idx[bool_check2] = 0
             per_sample_nfe[bool_check2] = 0
 
-        return x_next, lst_idx, log_ratio_prev, per_sample_nfe
+        return x_next, lst_idx.to(torch.int32), log_ratio_prev, per_sample_nfe.to(torch.int32)
 
     def save_img(images, index, save_type="npz", batch_size=100):
         ## Save images.
@@ -199,7 +207,7 @@ def diffrs_sampler(
     sigma_max = min(sigma_max, net.sigma_max)
 
     # Time step discretization.
-    step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
+    step_indices = torch.arange(num_steps, dtype=torch.float32, device=latents.device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
@@ -214,7 +222,7 @@ def diffrs_sampler(
         # Warmup
         lst_adaptive = [[] for i in range(len(t_steps))]
         lst_adaptive2 = [[] for i in range(len(t_steps))]
-        x_next = latents.to(torch.float64) * t_steps[0]
+        x_next = latents.to(torch.float32) * t_steps[0]
         lst_idx = torch.zeros((latents.shape[0],), device=latents.device).long()
         log_ratio_prev = torch.zeros((latents.shape[0],), device=latents.device)
         per_sample_nfe = torch.zeros((latents.shape[0],), device=latents.device).long()
@@ -224,10 +232,12 @@ def diffrs_sampler(
             x_next, lst_idx, log_ratio_prev, per_sample_nfe = sampling_loop(x_next, lst_idx, log_ratio_prev, per_sample_nfe, class_labels, warmup=True)
             bool_fin = lst_idx == num_steps
             if bool_fin.sum() > 0:
-                x_next[bool_fin] = torch.randn_like(x_next[bool_fin]).to(torch.float64) * t_steps[0]
+                xx=torch.randn_like(x_next[bool_fin],device='cpu').to(torch.float32)
+                x_next[bool_fin] = xx.to('hpu') * t_steps[0]
                 lst_idx[bool_fin] = torch.zeros_like(lst_idx[bool_fin]).long()
                 if (class_labels is not None) & (class_idx is None):
-                    class_labels[bool_fin] = torch.eye(net.label_dim, device=class_labels.device)[torch.randint(net.label_dim, size=[bool_fin.sum()], device=class_labels.device)]
+                    class_labels[bool_fin] = torch.eye(net.label_dim, device='cpu')[torch.randint(net.label_dim, size=[bool_fin.sum()],device='cpu')]
+                    class_labels.to('hpu')
                 num_warm += 1
         lst_adaptive = [torch.stack(lst_adaptive[i]) for i in range(0, len(t_steps))]
         lst_adaptive2 = [torch.zeros(len(x_next)*iter_warmup)] + [torch.stack(lst_adaptive2[i]) for i in range(1, len(t_steps))]
@@ -258,10 +268,10 @@ def diffrs_sampler(
     print(adaptive2)
 
     # Main sampling loop.
-    x_next = latents.to(torch.float64) * t_steps[0]
-    lst_idx = torch.zeros((latents.shape[0],), device=latents.device).long()
+    x_next = latents.to(torch.float32) * t_steps[0]
+    lst_idx = torch.zeros((latents.shape[0],), device=latents.device).to(torch.int32)
     log_ratio_prev = torch.zeros((latents.shape[0],), device=latents.device)
-    per_sample_nfe = torch.zeros((latents.shape[0],), device=latents.device).long()
+    per_sample_nfe = torch.zeros((latents.shape[0],), device=latents.device).to(torch.int32)
 
     pbar = tqdm(desc='Number of re-init. samples')
 
@@ -272,6 +282,7 @@ def diffrs_sampler(
     current_time = time.time()
     while total_samples <= num_samples:
         x_next, lst_idx, log_ratio_prev, per_sample_nfe = sampling_loop(x_next, lst_idx, log_ratio_prev, per_sample_nfe, class_labels)
+        # print([x_next.dtype, lst_idx.dtype, log_ratio_prev.dtype, per_sample_nfe.dtype], flush=True)
         bool_fin = lst_idx == num_steps
         if bool_fin.sum() > 0:
             if (batch_size - total_samples % batch_size) <= bool_fin.sum():
@@ -284,11 +295,17 @@ def diffrs_sampler(
                 x_fin[:bool_fin.sum() - batch_size + total_samples % batch_size] = x_next[bool_fin][batch_size - total_samples % batch_size:]
                 total_samples += bool_fin.sum()
             else:
+                #print(bool_fin)
                 x_fin[total_samples % batch_size:total_samples % batch_size + bool_fin.sum()] = x_next[bool_fin]
                 total_samples += bool_fin.sum()
-            x_next[bool_fin] = torch.randn_like(x_next[bool_fin]).to(torch.float64) * t_steps[0]
-            print(bool_fin)
-            print(lst_idx)
+                #print(bool_fin)
+            bool_fin_temp = cpy.deepcopy(bool_fin)
+            #print(bool_fin_temp)
+            xy=torch.randn_like(x_next[bool_fin_temp],device='cpu').to(torch.float32)
+            x_next[bool_fin_temp] = xy.to('hpu') * t_steps[0]
+            # bool_fin = cpy.deepcopy(bool_fin_temp)
+            #print(bool_fin, flush = True)
+            #print(lst_idx, flush = True)
             lst_idx[bool_fin] = torch.zeros_like(lst_idx[bool_fin]).long()
             log_ratio_prev[bool_fin] = torch.zeros_like(log_ratio_prev[bool_fin])
 
@@ -296,7 +313,8 @@ def diffrs_sampler(
             per_sample_nfe[bool_fin] = torch.zeros_like(per_sample_nfe[bool_fin]).long()
 
             if (class_labels is not None) & (class_idx is None):
-                class_labels[bool_fin] = torch.eye(net.label_dim, device=class_labels.device)[torch.randint(net.label_dim, size=[bool_fin.sum()], device=class_labels.device)]
+                class_labels[bool_fin] = torch.eye(net.label_dim, device='cpu')[torch.randint(net.label_dim, size=[bool_fin.sum()],device='cpu')]
+                class_labels.to('hpu')
 
             if mode == 'debug':
                 dict_nfe['total_nfe'] = total_nfe
@@ -396,19 +414,19 @@ def main(boosting, time_min, time_max, rej_percentile, cond, pretrained_classifi
 
     ## Set seed
     if do_seed:
-        random.seed(0)
-        np.random.seed(0)
-        torch.manual_seed(0)
-        torch.hpu.manual_seed_all(0)
+        random.seed(100)
+        np.random.seed(100)
+        torch.manual_seed(100)
+        torch.hpu.manual_seed_all(100)
     ## Pick latents and labels.
-    latents = torch.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+    latents = torch.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], dtype=torch.float32, device='cpu')
     class_labels = None
     if net.label_dim:
-        class_labels = torch.eye(net.label_dim, device=device)[torch.randint(net.label_dim, size=[batch_size], device=device)]
+        class_labels = torch.eye(net.label_dim, dtype=torch.float32)[torch.randint(net.label_dim, size=[batch_size],device='cpu')]
     if class_idx is not None:
         class_labels[:, :] = 0
         class_labels[:, class_idx] = 1
-
+    latents=latents.to('hpu')
     ## Generate images.
     sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
     diffrs_sampler(boosting, time_min, time_max, vpsde, rej_percentile, discriminator,
