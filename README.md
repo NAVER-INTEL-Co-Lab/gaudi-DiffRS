@@ -2,7 +2,7 @@
 This repository is the implementation of Diffusion Rejection Sampling, for Gaudi-v2 of the code below :
 * [Na, B., Kim, Y., Park, M., Shin, D., Kang, W., & Moon, I. C. Diffusion Rejection Sampling. In Forty-first International Conference on Machine Learning.](https://github.com/aailabkaist/DiffRS)
 
-
+--------
 | [paper](https://proceedings.mlr.press/v235/na24a.html) | [arXiv](https://arxiv.org/abs/2405.17880) | [poster](https://icml.cc/media/PosterPDFs/ICML%202024/34559.png?t=1721399675.3276865) |
 
 
