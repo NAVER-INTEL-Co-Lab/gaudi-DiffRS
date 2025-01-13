@@ -19,8 +19,14 @@ This paper introduces **Diffusion Rejection Sampling (DiffRS)**, a new diffusion
 
 The requirements for this code are the same as [DG](https://github.com/aailabkaist/DG).
 
-In our experiment, we utilized PyTorch 1.12.
+In our experiments, we utilized the Docker image vault.habana.ai/gaudi-docker/1.17.0/ubuntu22.04/habanalabs/pytorch-installer-2.3.1:latest.
 
+To run the Docker container based on this image, execute the following command:
+
+```.bash
+docker pull vault.habana.ai/gaudi-docker/1.17.0/ubuntu22.04/habanalabs/pytorch-installer-2.3.1:latest
+```
+This command starts a new container from the specified image, providing an environment with the necessary dependencies for your project.
 
 ## Diffusion Rejection Sampling
 
